@@ -3,10 +3,6 @@
 extern int bf();
 extern char storage[0x4096];
 
-int _print(int c) {
-    printf("%c\n", c + '0');
-}
-
 int main() {
     int j = bf();
 

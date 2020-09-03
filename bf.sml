@@ -1,52 +1,35 @@
-fun enumerate xs = let open List in ListPair.zip (tabulate (length xs, fn x => x), xs) end
-
 structure Syntax = struct
   datatype t
     = Off of int
     | Inc of int
     | Dec of int
-    | JumpF of int
-    | JumpB of int
+    | Enter
+    | Leave
     | Out
     | In
 
   local 
-    fun fold (Off a :: Off b :: xs)   = fold (Off (a + b) :: xs)
-      | fold (Inc a :: Inc b :: xs)   = fold (Inc (a + b) :: xs) 
-      | fold (Dec a :: Dec b :: xs)   = fold (Dec (a + b) :: xs)
+    fun fold (Off a :: Off b :: xs)  = fold (Off (a + b) :: xs)
+      | fold (Inc a :: Inc b :: xs)  = fold (Inc (a + b) :: xs) 
+      | fold (Dec a :: Dec b :: xs)  = fold (Dec (a + b) :: xs)
+      | fold (a :: Off 0 :: b :: xs) = fold (a::b::xs)
       | fold (Off 0 :: xs) = fold xs
       | fold (x :: xs) = x :: fold xs
       | fold [] = []
-
-    (* collect : int list -> int list -> (int * t) list -> ((int * int) list * t list) 
-    * take 2 accumulator lists to store forward and backward jump locations
-    * take 1 enumerated list of Syntax.t
-    * return a list of jump patches, and instructions
-    *)
-    fun collect fs bs ((idx, JumpF i) :: xs) = ((fn (bs, xs) => (bs, JumpF idx :: xs)) o collect (idx::fs) bs) xs
-      | collect (f::fs) bs ((idx, JumpB i) :: xs) = let val (bs, xs) = collect fs ((f, idx)::bs) xs in (bs, JumpB f :: xs) end 
-      | collect [] bs ((idx, JumpB i) :: xs) = raise Fail "Missing matching jump"
-      | collect fs bs ((_, x) :: xs) =  let val (bs, xs) = collect fs bs xs in (bs, x::xs) end
-      | collect _ bs [] = (bs, []) 
-
-    fun patch (ls, JumpF i :: xs) = 
-        (case List.find (fn (f, _) => f = i) ls 
-          of SOME (_, r) => JumpF r :: patch (ls, xs)
-            | NONE => raise Fail "Missing match jump")
-      | patch (ls, x::xs) = x :: patch (ls, xs)
-      | patch _ = []
+      
+    fun parseChar #">" = SOME (Off 1)
+      | parseChar #"<" = SOME (Off ~1)
+      | parseChar #"+" = SOME (Inc 1)
+      | parseChar #"-" = SOME (Dec 1)
+      | parseChar #"[" = SOME (Enter)
+      | parseChar #"]" = SOME (Leave)
+      | parseChar #"." = SOME (Out)
+      | parseChar #"," = SOME (In)
+      | parseChar _ = NONE
     
-    fun parseChar #">" = Off 1
-      | parseChar #"<" = Off ~1
-      | parseChar #"+" = Inc 1
-      | parseChar #"-" = Dec 1
-      | parseChar #"[" = JumpF 1
-      | parseChar #"]" = JumpB 1
-      | parseChar #"." = Out
-      | parseChar #"," = In
-      | parseChar _ = Off 0
+    val filterMap = (map Option.valOf) o (List.filter Option.isSome)
   in
-    val parse = patch o (collect [] []) o enumerate o fold o (map parseChar) o explode
+    val parse =  fold o filterMap o (map parseChar) o explode
   end
 end
 
@@ -56,6 +39,7 @@ datatype t
     | Loop of t list
     | Add of int * int
     | Sub of int * int
+    | Mul of int * int
     | Zero
     | Print
     | Read
@@ -63,54 +47,67 @@ datatype t
   val lower : Syntax.t list -> t list
 end
 
-structure IR :> IR_SIG = struct
+structure IR = struct
   datatype t 
     = Off of int
     | Loop of t list
     | Add of int * int
     | Sub of int * int
+    | Mul of int * int
     | Zero
     | Print
     | Read
 
   structure S = Syntax;
 
-  (* Compile to IR *)
-  fun translate (v: S.t list) = 
-    let 
-      fun loop target ((idx, x) :: xs) =
-          let 
-            val inner =
-            fn S.JumpF tgt => 
-                let val (a, b) = List.partition (fn (idx, _) => idx < tgt) xs
-                in Loop (loop tgt a) :: (loop target b) end
-              | S.JumpB tgt => if target = tgt then [] else loop target xs
-              | S.Off x => Off x :: loop target xs
-              | S.Inc x => Add (0, x) :: loop target xs
-              | S.Dec x => Sub (0, x):: loop target xs
-              | S.In => Read :: loop target xs
-              | S.Out => Print:: loop target xs
-          in 
-            inner x
-          end
-        | loop _ [] = []
-    in 
-      loop (List.length v) (enumerate v)
+  fun loop acc [] = (rev acc, [])
+    | loop acc (S.Enter :: xs) = let val (a, ys) = loop [] xs in loop (Loop(a) :: acc) ys end
+    | loop acc (S.Leave :: xs) = (rev acc, xs)
+    | loop acc (S.Inc x :: xs) = loop (Add (0, x) ::acc) xs 
+    | loop acc (S.Dec x :: xs) = loop (Sub (0, x) ::acc) xs 
+    | loop acc (S.Off x :: xs) = loop (Off x :: acc) xs
+    | loop acc (S.Out :: xs) = loop (Print ::acc) xs 
+    | loop acc (S.In :: xs) = loop (Read ::acc) xs 
+
+  exception CantOptimize of t list
+  (* multiplication optimization. this is only valid if the list contains 1 sub and the rest add operations *)
+  fun optimize xs =
+    let val pred = (fn Sub(0, _) => true | _ => false)
+        val item = List.find pred xs
+        val (subs, rest) = List.partition pred xs
+        val () = 
+          if (List.length subs) = 1 andalso List.all (fn Add _ => true | _ => false) rest 
+          then () 
+          else raise CantOptimize xs 
+        fun rep fact (Add (off, x)) = Mul (off, x * fact)
+          | rep _ x = x
+    in
+      case item 
+        of NONE => xs
+         | SOME (Sub(0, fact)) => map (rep fact) rest 
+         | _ => raise Fail "unreachable"
     end
 
   (* Optimization of IR *)  
   fun fold x (Add (y, b) :: Off z :: xs) = if y = z then Off y :: Add (0, b) :: fold x xs else Add (x+y, b) :: fold (x+z) xs
     | fold x (Sub (y, b) :: Off z :: xs) = if y = z then Off y :: Sub (0, b) :: fold x xs else Sub (x+y, b) :: fold (x+z) xs
+    | fold x (Add (y, b) :: Add (z, c) :: xs) = if y = z then Add (y, b + c) :: fold x xs else Add(x+y, b) :: Add(x+z, c) :: fold x xs
+    | fold x (Add (0, _) :: Zero :: xs) = Zero :: fold x xs
+    | fold x (Sub (0, _) :: Zero :: xs) = Zero :: fold x xs
     | fold x (Add (y, b) :: xs) = Add (x+y, b) :: fold x xs
     | fold x (Sub (y, b) :: xs) = Sub (x+y, b) :: fold x xs
     | fold x (Off a :: xs) = fold (x+a) xs
-    | fold x (Loop [Sub(0, 1)] :: xs) = fold' x Zero (fold 0 xs)
-    | fold x (Loop ys :: xs) = fold' x (Loop (fold 0 ys)) (fold 0 xs)
-    | fold x (instr :: xs) = fold' x instr xs
+    | fold x (Loop [Sub(0, 1)] :: xs) = foldOff x Zero (fold 0 xs)
+    | fold x (Loop ys :: xs) = foldLoop x ys xs
+    | fold x (instr :: xs) = foldOff x instr xs
     | fold x [] = if x <> 0 then [Off x] else []
-  and fold' x instr xs = if x <> 0 then Off x :: instr :: fold 0 xs else instr :: fold 0 xs
-
-  val lower = (fold 0) o translate 
+  and foldOff x instr xs = if x <> 0 then Off x :: instr :: xs else instr :: xs
+  and foldLoop x ys xs = 
+    let val ys = fold 0 ys 
+        val xs = fold 0 xs
+        val instrs = optimize ys @ (Zero::xs) handle CantOptimize ys => Loop ys :: xs
+    in if x <> 0 then Off x :: instrs else instrs end 
+  val lower = (fold 0) o (fold 0) o #1 o loop [] 
 end
 
 signature BACKEND = sig
@@ -118,21 +115,23 @@ signature BACKEND = sig
   val emit : IR.t list -> string
 end
 
+fun fix_int x = if x < 0 then "-" ^ (Int.toString o abs) x else Int.toString x
+fun fix_intp (pl,mi) x = (if x < 0 then mi else pl) ^ (Int.toString o abs) x
+
 functor Cbackend (IR : IR_SIG) :> BACKEND = struct 
   structure IR = IR;
-  fun emit' (IR.Off x) = (case Int.compare (x, 0) 
-      of GREATER => "ptr += " ^ (Int.toString x) ^ ";"
-        | LESS => "ptr -= " ^ (Int.toString (~x)) ^ ";"
-        | EQUAL => "")
-    | emit' (IR.Add (off, x))  = "*(ptr + " ^ (Int.toString off) ^") += " ^ (Int.toString x) ^ ";"
-    | emit' (IR.Sub (off, x))  = "*(ptr + " ^ (Int.toString off) ^") -= " ^ (Int.toString x) ^ ";"   
+  fun emit' (IR.Off x) = "ptr " ^ (fix_intp ("+= ", "-= ") x) ^";"
+    | emit' (IR.Add (off, x))  = "*(ptr " ^ (fix_intp ("+ ", "- ") off) ^") += " ^ (fix_int x) ^ ";"
+    | emit' (IR.Sub (off, x))  = "*(ptr " ^ (fix_intp ("+ ", "- ") off) ^") -= " ^ (fix_int x) ^ ";"   
     | emit' (IR.Loop xs) = "while (*ptr) {\n" ^ String.concatWith "\n" (map emit' xs) ^ "}"
     | emit' IR.Print = "putchar(*ptr);"
     | emit' IR.Read = "*ptr = getchar();"
     | emit' IR.Zero = "*ptr = 0;"
+    | emit' (IR.Mul (off, x)) = "*(ptr " ^ (fix_intp ("+ ", "- ") off) ^ ") += *ptr *" ^ (fix_int x) ^ ";"
 
-  fun emit xs = "#include <stdio.h>\n#include <stdlib.h>\nint main() {\nchar* ptr = (char*) calloc(30000, 1);char* pp = ptr;\n\n" 
-    ^ String.concatWith "\n" (map emit' xs) ^ "\nfree(pp);\nreturn 0;\n}\n"
+  fun emit xs = "#include <stdio.h>\n#include <stdlib.h>\nint main()"
+    ^ "{\n\tchar* ptr = (char*) calloc(30000, 1);\n\tchar* pp = ptr;\n\t\n\t" 
+    ^ String.concatWith "\n\t" (map emit' xs) ^ "\n\tfree(pp);\n\treturn 0;\n}\n"
 end;
 
 functor AMD64 (IR : IR_SIG) :> BACKEND = struct
@@ -141,32 +140,46 @@ functor AMD64 (IR : IR_SIG) :> BACKEND = struct
   fun fresh () = 
     let val next = !names
         val () = names := (next + 1)
-        val s = "label" ^ (Int.toString next)
-    in s end
+    in (Int.toString next) end 
 
-  val prelude  = ".section .text\n.global bf\n.global storage\n.extern putchar\n.extern getc\nbf:\n\tlea storage(%rip), %rdx\n\t"
-  val epilogue = ".section .data\n.lcomm storage, 30000\n"
-  val printSys = "print:\n\tpushq %rdx\n\tmov (%rdx), %rdi\n\tcall putchar\n\tpopq %rdx\n\tret\n"
-  val readSys  = "read:\n\tpushq %rdx\n\tmov (%rdx), %rdi\n\tcall getchar\n\tpopq %rdx\n\tret\n"
+  val prelude = [".section .text", ".global bf", ".global storage", ".extern putchar", 
+    ".extern getchar", "bf:", "lea storage(%rip), %rdx"]
 
-  fun emit' (IR.Off x)  = 
-    (case Int.compare (x, 0) 
-      of GREATER => "addq $" ^ (Int.toString x) ^ ", %rdx"
-        | LESS => "subq $" ^ (Int.toString (~x)) ^ ", %rdx"
-        | EQUAL => "")
+  val epilogue = ["mov %rdx, %rax", "lea storage(%rip), %rdx", "sub %rdx, %rax", 
+    "ret", "print:", "push %rdx", "mov (%rdx), %rdi", "call putchar", "pop %rdx",
+    "ret", "read:", "push %rdx", "mov (%rdx), %rdi", "call getchar", "pop %rdx", 
+    "mov %rax, (%rdx)", "ret", ".section .bss", ".lcomm storage, 30000\n"]
+
+  fun reg x = (fix_int x) ^ "(%rdx)"
+  fun emit' (IR.Off x)  = (fix_intp ("add $", "sub $") x) ^ ", %rdx"
     | emit' (IR.Loop xs) = 
       let val label = fresh ()
-          val post = fresh ()
-          val cond = "movq (%rdx), %rax\n\ttest %al, %al\n\tjz " ^ post ^ "\n"
-          val jmp = "movq (%rdx), %rax\n\ttest %al, %al\n\tjnz " ^ label ^ "\n\n" ^ post ^ ":"
-          val instrs = String.concatWith "\n\t" (map emit' xs)
-      in String.concatWith "\n\t" [cond, label ^ ":", instrs, jmp] end
+          val post = "p" ^ label
+          val label = "L" ^ label
+          val cond = "mov (%rdx), %rax\ntest %al, %al\njz " ^ post
+          val jmp = "jmp " ^ label ^ "\n\n" ^ post ^ ":"
+          val instrs = String.concatWith "\n" (map emit' xs)
+      in String.concatWith "\n" ["\n", label ^ ":", cond, instrs, jmp] end
     | emit' IR.Print = "call print"
     | emit' IR.Read = "call read"
-    | emit' (IR.Add (off, v)) = "addq $" ^ (Int.toString v) ^ ", " ^ (Int.toString off) ^ "(%rdx)"
-    | emit' (IR.Sub (off, v)) = "subq $" ^ (Int.toString v) ^ ", " ^ (Int.toString off) ^ "(%rdx)"
-    | emit' IR.Zero = "movq $0, (%rdx)"
-  fun emit xs = prelude ^ String.concatWith "\n\t" (map emit' xs) ^ "\n\tret\n" ^ printSys ^ readSys ^ epilogue
+    | emit' (IR.Add (off, v)) = "addb $" ^ (fix_int v) ^ ", " ^ reg off 
+    | emit' (IR.Sub (off, v)) = "subb $" ^ (fix_int v) ^ ", " ^ reg off 
+    | emit' IR.Zero = "movb $0, (%rdx)"
+    | emit' (IR.Mul (off, v)) = 
+        let val instr = ["lea " ^ (reg off) ^ ", %rdi",
+        "movzx (%rdx), %ecx", "movzx (%rdi), %eax",
+        "mov $" ^ (fix_int v) ^ ", %rsi",
+        "imul %esi, %ecx", "add %ecx, %eax", "movb %al, (%rdi)"]
+        in String.concatWith "\n" instr end
+(*    | emit' (IR.Mul (off, v)) = 
+        "lea (%rdx, 1, $" ^ (fix_int v) ^ "), %rcx\nmov (%rcx), %rsi\nmov (%rdx),"
+        ^ " %rax\n" ^ "imul $" ^ (fix_int v) ^ ", %rax\nadd %rsi, %rax\nmovb
+        $al, (%rcx)" *)
+
+  fun emit xs = 
+    let val instrs = map emit' xs
+    in String.concatWith "\n" (prelude @ instrs @ epilogue) end
+  
 end
 
 functor Compiler(C : BACKEND) = struct
@@ -174,10 +187,7 @@ functor Compiler(C : BACKEND) = struct
 end
 
 structure C = Compiler(Cbackend(IR));
-structure Asm = Compiler(AMD64(IR));
+structure A = Compiler(AMD64(IR));
 
-val hello = "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++."
-
-
-val input = TextIO.input TextIO.stdIn
-val _ = print (C.compile input)
+val input = TextIO.inputAll TextIO.stdIn
+val _ = print (A.compile input) 
