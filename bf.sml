@@ -63,11 +63,9 @@ end
 structure Assembly = struct
   datatype asm 
     = Off of int
-    | AddR of int 
-    | SubR of int 
     | Loop of asm list
-    | FAdd of int * int
-    | FSub of int * int
+    | Add of int * int
+    | Sub of int * int
     | Print
     | Read
 
@@ -84,8 +82,8 @@ structure Assembly = struct
                 in Loop (loop tgt a) :: (loop target b) end
               | S.JumpB tgt => if target = tgt then [] else loop target xs
               | S.Off x => Off x :: loop target xs
-              | S.Inc x => AddR x :: loop target xs
-              | S.Dec x => SubR x :: loop target xs
+              | S.Inc x => Add (0, x) :: loop target xs
+              | S.Dec x => Sub (0, x):: loop target xs
               | S.In => Read :: loop target xs
               | S.Out => Print:: loop target xs
           in 
@@ -97,8 +95,8 @@ structure Assembly = struct
     end
   
   
-  fun fold x (Off a :: AddR b :: xs)  = FAdd (x+a, b) :: fold (x+a) xs
-    | fold x (Off a :: SubR b :: xs)  = FSub (x+a, b) :: fold (x+a) xs
+  fun fold x (Add (y, b) :: xs)  = FAdd (x, b) :: fold x xs
+    | fold x (Sub (y, b) :: xs)  = FSub (x, b) :: fold x xs
     | fold x (Off a :: xs) = fold (x+a) xs
     | fold x (Loop ys :: xs) = fold' x (Loop (fold 0 ys)) (fold x xs)
     | fold x (instr :: xs) = fold' x instr xs
@@ -106,7 +104,10 @@ structure Assembly = struct
   and fold' x instr xs = if x <> 0 then Off x :: instr :: fold 0 xs else instr :: fold 0 xs
 
   (* C emitter *)
-  fun emitC (Off x) = "ptr += " ^ (Int.toString x) ^ ";"
+  fun emitC (Off x) = (case Int.compare (x, 0) 
+       of GREATER => "ptr += " ^ (Int.toString x) ^ ";"
+        | LESS => "ptr -= " ^ (Int.toString (~x)) ^ ";"
+        | EQUAL => "")
     | emitC (AddR x)  = "*ptr += " ^ (Int.toString x) ^ ";"
     | emitC (SubR x)  = "*ptr -= " ^ (Int.toString x) ^ ";"   
     | emitC (Loop xs) = "while (*ptr) {\n" ^ String.concatWith "\n" (map emitC xs) ^ "}"
@@ -133,7 +134,7 @@ structure Assembly = struct
   fun emit' (Off x)  = 
     (case Int.compare (x, 0) 
        of GREATER => "addq $" ^ (Int.toString x) ^ ", %rdx"
-        | LESS => "subq $" ^ (Int.toString x) ^ ", %rdx"
+        | LESS => "subq $" ^ (Int.toString (~x)) ^ ", %rdx"
         | EQUAL => "")
     | emit' (AddR x)  = "addq $" ^ (Int.toString x) ^ ", (%rdx)"
     | emit' (SubR x)  = "subq $" ^ (Int.toString x) ^ ", (%rdx)"        
@@ -146,7 +147,8 @@ structure Assembly = struct
       in String.concatWith "\n\t" [cond, label ^ ":", instrs, jmp] end
     | emit' Print = "call print"
     | emit' Read = "call read"
-    | emit' _ = raise Match
+    | emit' (FAdd (off, v)) = "addq $" ^ (Int.toString v) ^ ", " ^ (Int.toString off) ^ "(%rdx)"
+    | emit' (FSub (off, v)) = "subq $" ^ (Int.toString v) ^ ", " ^ (Int.toString off) ^ "(%rdx)"
 
   fun emitAsm xs = prelude ^ String.concatWith "\n\t" (map emit' xs) ^ "\n\tret\n" ^ printSys ^ readSys ^ epilogue
 
