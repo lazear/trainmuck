@@ -94,8 +94,9 @@ structure Assembly = struct
       loop (List.length v) (enumerate v)
     end
   
-  
-  fun fold x (Add (y, b) :: xs) = Add (x+y, b) :: fold x xs
+  fun fold x (Add (y, b) :: Off z :: xs) = if y = z then Off y :: Add (0, b) :: fold x xs else Add (x+y, b) :: fold (x+z) xs
+    | fold x (Sub (y, b) :: Off z :: xs) = if y = z then Off y :: Sub (0, b) :: fold x xs else Sub (x+y, b) :: fold (x+z) xs
+    | fold x (Add (y, b) :: xs) = Add (x+y, b) :: fold x xs
     | fold x (Sub (y, b) :: xs) = Sub (x+y, b) :: fold x xs
     | fold x (Off a :: xs) = fold (x+a) xs
     | fold x (Loop ys :: xs) = fold' x (Loop (fold 0 ys)) (fold 0 xs)
