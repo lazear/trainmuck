@@ -95,10 +95,10 @@ structure Assembly = struct
     end
   
   
-  fun fold x (Add (y, b) :: xs)  = FAdd (x, b) :: fold x xs
-    | fold x (Sub (y, b) :: xs)  = FSub (x, b) :: fold x xs
+  fun fold x (Add (y, b) :: xs) = Add (x+y, b) :: fold x xs
+    | fold x (Sub (y, b) :: xs) = Sub (x+y, b) :: fold x xs
     | fold x (Off a :: xs) = fold (x+a) xs
-    | fold x (Loop ys :: xs) = fold' x (Loop (fold 0 ys)) (fold x xs)
+    | fold x (Loop ys :: xs) = fold' x (Loop (fold 0 ys)) (fold 0 xs)
     | fold x (instr :: xs) = fold' x instr xs
     | fold x [] = if x <> 0 then [Off x] else []
   and fold' x instr xs = if x <> 0 then Off x :: instr :: fold 0 xs else instr :: fold 0 xs
@@ -108,12 +108,11 @@ structure Assembly = struct
        of GREATER => "ptr += " ^ (Int.toString x) ^ ";"
         | LESS => "ptr -= " ^ (Int.toString (~x)) ^ ";"
         | EQUAL => "")
-    | emitC (AddR x)  = "*ptr += " ^ (Int.toString x) ^ ";"
-    | emitC (SubR x)  = "*ptr -= " ^ (Int.toString x) ^ ";"   
+    | emitC (Add (off, x))  = "*(ptr + " ^ (Int.toString off) ^") += " ^ (Int.toString x) ^ ";"
+    | emitC (Sub (off, x))  = "*(ptr + " ^ (Int.toString off) ^") -= " ^ (Int.toString x) ^ ";"   
     | emitC (Loop xs) = "while (*ptr) {\n" ^ String.concatWith "\n" (map emitC xs) ^ "}"
     | emitC Print = "putchar(*ptr);"
     | emitC Read = "*ptr = getc();"
-    | emitC _ = raise Match
 
   fun emit xs = "#include <stdio.h>\n#include <stdlib.h>\nint main() {\nchar* ptr = (char*) malloc(0x4096);\n" ^ String.concatWith "\n" (map emitC xs) ^ "return 0;\n}\n"
 
@@ -136,8 +135,8 @@ structure Assembly = struct
        of GREATER => "addq $" ^ (Int.toString x) ^ ", %rdx"
         | LESS => "subq $" ^ (Int.toString (~x)) ^ ", %rdx"
         | EQUAL => "")
-    | emit' (AddR x)  = "addq $" ^ (Int.toString x) ^ ", (%rdx)"
-    | emit' (SubR x)  = "subq $" ^ (Int.toString x) ^ ", (%rdx)"        
+    (* | emit' (AddR x)  = "addq $" ^ (Int.toString x) ^ ", (%rdx)"
+    | emit' (SubR x)  = "subq $" ^ (Int.toString x) ^ ", (%rdx)"         *)
     | emit' (Loop xs) = 
       let val label = fresh ()
           val post = fresh ()
@@ -147,8 +146,8 @@ structure Assembly = struct
       in String.concatWith "\n\t" [cond, label ^ ":", instrs, jmp] end
     | emit' Print = "call print"
     | emit' Read = "call read"
-    | emit' (FAdd (off, v)) = "addq $" ^ (Int.toString v) ^ ", " ^ (Int.toString off) ^ "(%rdx)"
-    | emit' (FSub (off, v)) = "subq $" ^ (Int.toString v) ^ ", " ^ (Int.toString off) ^ "(%rdx)"
+    | emit' (Add (off, v)) = "addq $" ^ (Int.toString v) ^ ", " ^ (Int.toString off) ^ "(%rdx)"
+    | emit' (Sub (off, v)) = "subq $" ^ (Int.toString v) ^ ", " ^ (Int.toString off) ^ "(%rdx)"
 
   fun emitAsm xs = prelude ^ String.concatWith "\n\t" (map emit' xs) ^ "\n\tret\n" ^ printSys ^ readSys ^ epilogue
 
@@ -164,13 +163,14 @@ structure Assembly = struct
     in {store=s', ptr=ptr} end
   fun updatePtr {store, ptr} f = {store=store, ptr=f ptr}
 
+  fun arith {store, ptr} off f = 
+     let val {store,...} = update {store=store, ptr= ptr + off} f in {store=store, ptr=ptr} end
   fun eval s (Off x) = updatePtr s (fn p => p + x)
-    | eval s (AddR x) = update s (fn v => v+x)
-    | eval s (SubR x) = update s (fn v => v-x)
+    | eval s (Add (off, x)) = arith s off (fn v => v+x)
+    | eval s (Sub (off, x)) = arith s off (fn v => v-x)
     | eval s (Print) = update s (fn v => (print (Char.toString (chr v)); v))
     | eval s (Read) = update s (fn _ => (ord o Option.valOf o TextIO.input1) TextIO.stdIn)
     | eval s (Loop xs) = loop s xs
-    | eval s _ = raise Match
   and loop (s as {store, ptr}) (xs) = 
     case Vector.sub(store, ptr)
       of 0 => s
@@ -181,8 +181,10 @@ end
 
 val trans = Assembly.translate o Syntax.parse
 val compile = Assembly.emit o trans
-val compile' = Assembly.emitAsm o trans
+val compile' = (Assembly.emitAsm o Assembly.fold 0) o trans
 val run = Assembly.eval o trans
 val hello = "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++."
 
 val () = print (compile' hello)
+
+val e = (Assembly.fold 0) o trans
