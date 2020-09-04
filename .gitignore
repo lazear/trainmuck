@@ -4,3 +4,6 @@ bf
 *.s
 *.c
 !driver.c
+/competition
+/build
+stats.md
