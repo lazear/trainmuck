@@ -40,6 +40,7 @@ datatype t
     | Add of int * int
     | Sub of int * int
     | Mul of int * int
+    | Div of int * int 
     | Zero
     | Print
     | Read
@@ -54,12 +55,14 @@ structure IR = struct
     | Add of int * int
     | Sub of int * int
     | Mul of int * int
+    | Div of int * int 
     | Zero
     | Print
     | Read
 
   structure S = Syntax;
 
+  (* Build explicit loops *)
   fun loop acc [] = (rev acc, [])
     | loop acc (S.Enter :: xs) = let val (a, ys) = loop [] xs in loop (Loop(a) :: acc) ys end
     | loop acc (S.Leave :: xs) = (rev acc, xs)
@@ -70,21 +73,22 @@ structure IR = struct
     | loop acc (S.In :: xs) = loop (Read ::acc) xs 
 
   exception CantOptimize of t list
-  (* multiplication optimization. this is only valid if the list contains 1 sub and the rest add operations *)
+  (* Perform loop optimizations *)
   fun optimize xs =
     let val pred = (fn Sub(0, _) => true | _ => false)
         val item = List.find pred xs
         val (subs, rest) = List.partition pred xs
         val () = 
-          if (List.length subs) = 1 andalso List.all (fn Add _ => true | _ => false) rest 
+          if (List.length subs) = 1 andalso List.all (fn Add _ => true | Sub _ => true | _ => false) rest 
           then () 
           else raise CantOptimize xs 
+        (* Transform + => * and - => / *) 
         fun rep fact (Add (off, x)) = Mul (off, x * fact)
+          | rep fact (Sub (off, x)) = Div (off, x * fact)
           | rep _ x = x
     in
       case item 
-        of NONE => xs
-         | SOME (Sub(0, fact)) => map (rep fact) rest 
+        of SOME (Sub(0, fact)) => map (rep fact) rest 
          | _ => raise Fail "unreachable"
     end
 
@@ -115,6 +119,7 @@ signature BACKEND = sig
   val emit : IR.t list -> string
 end
 
+(* format ints properly *)
 fun fix_int x = if x < 0 then "-" ^ (Int.toString o abs) x else Int.toString x
 fun fix_intp (pl,mi) x = (if x < 0 then mi else pl) ^ (Int.toString o abs) x
 
@@ -128,7 +133,7 @@ functor Cbackend (IR : IR_SIG) :> BACKEND = struct
     | emit' IR.Read = "*ptr = getchar();"
     | emit' IR.Zero = "*ptr = 0;"
     | emit' (IR.Mul (off, x)) = "*(ptr " ^ (fix_intp ("+ ", "- ") off) ^ ") += *ptr *" ^ (fix_int x) ^ ";"
-
+    | emit' (IR.Div (off, x)) = "*(ptr " ^ (fix_intp ("+ ", "- ") off) ^ ") -= *ptr * " ^ (fix_int x) ^ ";"
   fun emit xs = "#include <stdio.h>\n#include <stdlib.h>\nint main()"
     ^ "{\n\tchar* ptr = (char*) calloc(30000, 1);\n\tchar* pp = ptr;\n\t\n\t" 
     ^ String.concatWith "\n\t" (map emit' xs) ^ "\n\tfree(pp);\n\treturn 0;\n}\n"
@@ -151,6 +156,14 @@ functor AMD64 (IR : IR_SIG) :> BACKEND = struct
     "mov %rax, (%rdx)", "ret", ".section .bss", ".lcomm storage, 30000\n"]
 
   fun reg x = (fix_int x) ^ "(%rdx)"
+
+  (* emit multiply/divide instruction *)        
+  fun cinstr off v which = [
+          "lea " ^ (reg off) ^ ", %rdi",
+          "movzx (%rdx), %ecx", "movzx (%rdi), %eax",
+          "mov $" ^ (fix_int v) ^ ", %rsi",
+          "imul %esi, %ecx", which, "movb %al, (%rdi)"]
+
   fun emit' (IR.Off x)  = (fix_intp ("add $", "sub $") x) ^ ", %rdx"
     | emit' (IR.Loop xs) = 
       let val label = fresh ()
@@ -165,21 +178,10 @@ functor AMD64 (IR : IR_SIG) :> BACKEND = struct
     | emit' (IR.Add (off, v)) = "addb $" ^ (fix_int v) ^ ", " ^ reg off 
     | emit' (IR.Sub (off, v)) = "subb $" ^ (fix_int v) ^ ", " ^ reg off 
     | emit' IR.Zero = "movb $0, (%rdx)"
-    | emit' (IR.Mul (off, v)) = 
-        let val instr = ["lea " ^ (reg off) ^ ", %rdi",
-        "movzx (%rdx), %ecx", "movzx (%rdi), %eax",
-        "mov $" ^ (fix_int v) ^ ", %rsi",
-        "imul %esi, %ecx", "add %ecx, %eax", "movb %al, (%rdi)"]
-        in String.concatWith "\n" instr end
-(*    | emit' (IR.Mul (off, v)) = 
-        "lea (%rdx, 1, $" ^ (fix_int v) ^ "), %rcx\nmov (%rcx), %rsi\nmov (%rdx),"
-        ^ " %rax\n" ^ "imul $" ^ (fix_int v) ^ ", %rax\nadd %rsi, %rax\nmovb
-        $al, (%rcx)" *)
+    | emit' (IR.Mul (off, v)) = String.concatWith "\n" (cinstr off v "add %ecx, %eax")  
+    | emit' (IR.Div (off, v)) = String.concatWith "\n" (cinstr off v "sub %ecx, %eax")  
 
-  fun emit xs = 
-    let val instrs = map emit' xs
-    in String.concatWith "\n" (prelude @ instrs @ epilogue) end
-  
+  fun emit xs = String.concatWith "\n" (prelude @ (map emit' xs) @ epilogue)
 end
 
 functor Compiler(C : BACKEND) = struct
@@ -190,4 +192,8 @@ structure C = Compiler(Cbackend(IR));
 structure A = Compiler(AMD64(IR));
 
 val input = TextIO.inputAll TextIO.stdIn
-val _ = print (A.compile input) 
+
+val args = CommandLine.arguments ()
+val _ = case List.find (fn x => x = "-c") args
+  of SOME _ => print (C.compile input)
+   | NONE   => print (A.compile input)
