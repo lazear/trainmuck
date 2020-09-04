@@ -1,0 +1,6 @@
+bf
+*.o
+*.out
+*.s
+*.c
+!driver.c
