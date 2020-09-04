@@ -93,10 +93,7 @@ structure IR = struct
     end
 
   (* Optimization of IR *)  
-  fun fold x (Add (y, b) :: Off z :: xs) = if y = z then Off y :: Add (0, b) :: fold x xs else Add (x+y, b) :: fold (x+z) xs
-    | fold x (Sub (y, b) :: Off z :: xs) = if y = z then Off y :: Sub (0, b) :: fold x xs else Sub (x+y, b) :: fold (x+z) xs
-    | fold x (Add (y, b) :: Add (z, c) :: xs) = if y = z then Add (y, b + c) :: fold x xs else Add(x+y, b) :: Add(x+z, c) :: fold x xs
-    | fold x (Add (0, _) :: Zero :: xs) = Zero :: fold x xs
+  fun fold x (Add (0, _) :: Zero :: xs) = Zero :: fold x xs
     | fold x (Sub (0, _) :: Zero :: xs) = Zero :: fold x xs
     | fold x (Add (y, b) :: xs) = Add (x+y, b) :: fold x xs
     | fold x (Sub (y, b) :: xs) = Sub (x+y, b) :: fold x xs
